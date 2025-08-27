@@ -1,13 +1,22 @@
-use chumsky::{extra::ParserExtra, prelude::*};
-use itertools::{Itertools, chain};
-
-pub const ENDPOINT: (&str, u16) = ("eaccess.play.net", 7900);
+use itertools::chain;
+use nom::{
+    Finish, IResult, Parser,
+    bytes::complete::{is_not, tag, take_until, take_while},
+    character::complete::one_of,
+    combinator::{all_consuming, opt},
+    error::{Error as NomError, ParseError as NomParseError},
+    multi::{many0, many1},
+    sequence::{delimited, pair, preceded, separated_pair, terminated},
+};
+use std::fmt::Debug;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("{0}")]
-    ParseError(String),
+    #[error("test")]
+    ParseError(#[from] NomError<String>),
 }
+
+pub const ENDPOINT: (&str, u16) = ("eaccess.play.net", 7900);
 
 /// Hashes a password using the hash key provided by play.net
 pub fn hash_password(
@@ -22,7 +31,7 @@ pub struct K<'a> {
     pub key: &'a str,
 }
 
-impl<'a> K<'a> {
+impl K<'_> {
     #[inline(always)]
     pub const fn out() -> &'static str {
         "K\n"
@@ -30,8 +39,10 @@ impl<'a> K<'a> {
 }
 
 impl<'a> Message<'a> for K<'a> {
-    fn parser() -> impl Parser<'a, &'a str, Self, extra::Err<Simple<'a, char>>> {
-        taken_ignore(just('\n')).map(|key| Self { key })
+    fn parse_raw<E: NomParseError<&'a str>>(i: &'a str) -> IResult<&'a str, Self, E> {
+        let (i, key) = word(i)?;
+
+        Ok((i, Self { key }))
     }
 }
 
@@ -52,13 +63,15 @@ impl A<'_> {
 }
 
 impl<'a> Message<'a> for A<'a> {
-    fn parser() -> impl Parser<'a, &'a str, Self, extra::Err<Simple<'a, char>>> {
-        group((
-            just("A\t").ignore_then(taken_ignore(just('\t'))),
-            just("KEY\t").ignore_then(taken_ignore(just('\t'))),
-            taken_ignore(just('\n')),
-        ))
-        .map(|(account, key, name)| Self { account, key, name })
+    fn parse_raw<E: NomParseError<&'a str>>(i: &'a str) -> IResult<&'a str, Self, E> {
+        let (i, (account, key, name)) = (
+            preceded(tag("A\t"), word),
+            preceded(tag("KEY\t"), word),
+            word,
+        )
+            .parse(i)?;
+
+        Ok((i, Self { account, key, name }))
     }
 }
 
@@ -73,17 +86,13 @@ impl M<'_> {
 }
 
 impl<'a> Message<'a> for M<'a> {
-    fn parser() -> impl Parser<'a, &'a str, Self, extra::Err<Simple<'a, char>>> {
-        just("M\t")
-            .ignore_then(
-                group((taken_ignore(just('\t')), taken_ignore(one_of("\t\n"))))
-                    .repeated()
-                    .at_least(1)
-                    .collect(),
-            )
-            .map(|v: Vec<(&'a str, &'a str)>| Self(v))
+    fn parse_raw<E: NomParseError<&'a str>>(i: &'a str) -> IResult<&'a str, Self, E> {
+        let (i, val) = preceded(tag("M\t"), many1(pair(word, word))).parse(i)?;
+
+        Ok((i, Self(val)))
     }
 }
+
 #[derive(Debug, Clone)]
 pub enum NEnvironment<'a> {
     /// PRODUCTION
@@ -161,17 +170,22 @@ impl N<'_> {
 }
 
 impl<'a> Message<'a> for N<'a> {
-    fn parser() -> impl Parser<'a, &'a str, Self, extra::Err<Simple<'a, char>>> {
-        group((
-            just("N\t").ignore_then(taken_ignore(just('|')).map(|v| v.into())),
-            taken_ignore(one_of("|\n")).map(|v| v.into()),
-            taken_ignore(just('\n')).or_not().map(|v| v.into()),
+    fn parse_raw<E: NomParseError<&'a str>>(i: &'a str) -> IResult<&'a str, Self, E> {
+        let (i, (environment, protocol, access)) = (
+            delimited(tag("N\t"), take_until("|"), tag("|")),
+            terminated(is_not("|\n"), one_of("|\n")),
+            opt(terminated(take_until("\n"), tag("\n"))),
+        )
+            .parse(i)?;
+
+        Ok((
+            i,
+            Self {
+                environment: environment.into(),
+                protocol: protocol.into(),
+                access: access.into(),
+            },
         ))
-        .map(|(environment, protocol, access)| Self {
-            environment,
-            protocol,
-            access,
-        })
     }
 }
 
@@ -217,10 +231,10 @@ impl F<'_> {
 }
 
 impl<'a> Message<'a> for F<'a> {
-    fn parser() -> impl Parser<'a, &'a str, Self, extra::Err<Simple<'a, char>>> {
-        just("F\t")
-            .ignore_then(taken_ignore(just('\n')))
-            .map(|v| Self(v.into()))
+    fn parse_raw<E: NomParseError<&'a str>>(i: &'a str) -> IResult<&'a str, Self, E> {
+        let (i, val) = delimited(tag("F\t"), take_until("\n"), tag("\n")).parse(i)?;
+
+        Ok((i, Self(val.into())))
     }
 }
 
@@ -241,20 +255,28 @@ impl G<'_> {
 }
 
 impl<'a> Message<'a> for G<'a> {
-    fn parser() -> impl Parser<'a, &'a str, Self, extra::Err<Simple<'a, char>>> {
-        group((
-            just("G\t").ignore_then(taken_ignore(just('\t'))),
-            taken_ignore(just('\t')).then_ignore(just("0\t\t")),
-            group((taken_ignore(just('=')), taken_ignore(one_of("\t\n"))))
-                .repeated()
-                .at_least(1)
-                .collect(),
+    fn parse_raw<E: NomParseError<&'a str>>(i: &'a str) -> IResult<&'a str, Self, E> {
+        let (i, (name, model, data)) = (
+            preceded(tag("G\t"), word),
+            word,
+            preceded(
+                tag("0\t\t"),
+                many1(terminated(
+                    separated_pair(take_until("="), tag("="), is_not("\t\n")),
+                    one_of("\t\n"),
+                )),
+            ),
+        )
+            .parse(i)?;
+
+        Ok((
+            i,
+            Self {
+                name,
+                model: model.into(),
+                data,
+            },
         ))
-        .map(|(name, model, data)| Self {
-            name,
-            model: model.into(),
-            data,
-        })
     }
 }
 
@@ -276,23 +298,21 @@ impl P<'_> {
 }
 
 impl<'a> Message<'a> for P<'a> {
-    fn parser() -> impl Parser<'a, &'a str, Self, extra::Err<Simple<'a, char>>> {
-        group((
-            just("P\t").ignore_then(taken_ignore(just('\t'))),
-            taken_ignore(just('\t')),
-            taken_ignore(just('\t')),
-            taken_ignore(just('\t')),
-            taken_ignore(just('\t')),
-            taken_ignore(just('\n')),
+    fn parse_raw<E: NomParseError<&'a str>>(i: &'a str) -> IResult<&'a str, Self, E> {
+        let (i, (p0, p1, p2, p3, p4, p5)) =
+            (preceded(tag("P\t"), word), word, word, word, word, word).parse(i)?;
+
+        Ok((
+            i,
+            Self {
+                p0,
+                p1,
+                p2,
+                p3,
+                p4,
+                p5,
+            },
         ))
-        .map(|(p0, p1, p2, p3, p4, p5)| Self {
-            p0,
-            p1,
-            p2,
-            p3,
-            p4,
-            p5,
-        })
     }
 }
 
@@ -319,24 +339,26 @@ impl C<'_> {
 }
 
 impl<'a> Message<'a> for C<'a> {
-    fn parser() -> impl Parser<'a, &'a str, Self, extra::Err<Simple<'a, char>>> {
-        group((
-            just("C\t").ignore_then(number().then_ignore(just('\t'))),
-            number().then_ignore(just('\t')),
-            number().then_ignore(just('\t')),
-            number().then_ignore(one_of("\t\n")),
-            taken_ignore(just('\t'))
-                .then(taken_ignore(one_of("\t\n")))
-                .repeated()
-                .collect(),
+    fn parse_raw<E: NomParseError<&'a str>>(i: &'a str) -> IResult<&'a str, Self, E> {
+        let (i, (nc, ns, n0, n1, characters)) = (
+            delimited(tag("C\t"), number, tag("\t")),
+            terminated(number, tag("\t")),
+            terminated(number, tag("\t")),
+            terminated(number, one_of("\t\n")),
+            many0(pair(word, word)),
+        )
+            .parse(i)?;
+
+        Ok((
+            i,
+            Self {
+                num_characters: nc,
+                max_characters: ns,
+                n0,
+                n1,
+                characters,
+            },
         ))
-        .map(|(nc, ns, n0, n1, characters)| Self {
-            num_characters: nc,
-            max_characters: ns,
-            n0,
-            n1,
-            characters,
-        })
     }
 }
 
@@ -368,61 +390,56 @@ impl L<'_> {
 }
 
 impl<'a> Message<'a> for L<'a> {
-    fn parser() -> impl Parser<'a, &'a str, Self, extra::Err<Simple<'a, char>>> {
-        group((
-            just("L\tOK\tUPPORT=").ignore_then(number().then_ignore(just('\t'))),
-            just("GAME=").ignore_then(taken_ignore(just('\t'))),
-            just("GAMECODE=").ignore_then(taken_ignore(just('\t'))),
-            just("FULLGAMENAME=").ignore_then(taken_ignore(just('\t'))),
-            just("GAMEFILE=").ignore_then(taken_ignore(just('\t'))),
-            just("GAMEHOST=").ignore_then(taken_ignore(just('\t'))),
-            just("GAMEPORT=").ignore_then(number().then_ignore(just('\t'))),
-            just("KEY=").ignore_then(taken_ignore(just('\n'))),
-        ))
-        .map(
-            |(upport, game, game_code, full_game_name, game_file, game_host, game_port, key)| {
-                Self {
-                    upport,
-                    game,
-                    game_code,
-                    full_game_name,
-                    game_file,
-                    game_host,
-                    game_port,
-                    key,
-                }
+    fn parse_raw<E: NomParseError<&'a str>>(i: &'a str) -> IResult<&'a str, Self, E> {
+        let (i, (upport, game, game_code, full_game_name, game_file, game_host, game_port, key)) =
+            (
+                delimited(tag("L\tOK\tUPPORT="), number, tag("\t")),
+                delimited(tag("GAME="), take_until("\t"), tag("\t")),
+                delimited(tag("GAMECODE="), take_until("\t"), tag("\t")),
+                delimited(tag("FULLGAMENAME="), take_until("\t"), tag("\t")),
+                delimited(tag("GAMEFILE="), take_until("\t"), tag("\t")),
+                delimited(tag("GAMEHOST="), take_until("\t"), tag("\t")),
+                delimited(tag("GAMEPORT="), number, tag("\t")),
+                delimited(tag("KEY="), take_until("\n"), tag("\n")),
+            )
+                .parse(i)?;
+
+        Ok((
+            i,
+            Self {
+                upport,
+                game,
+                game_code,
+                full_game_name,
+                game_file,
+                game_host,
+                game_port,
+                key,
             },
-        )
+        ))
     }
 }
 
 pub trait Message<'a>: Sized {
-    fn parser() -> impl Parser<'a, &'a str, Self, extra::Err<Simple<'a, char>>>;
+    fn parse_raw<E: NomParseError<&'a str>>(i: &'a str) -> IResult<&'a str, Self, E>;
 
-    fn parse(inp: &'a str) -> Result<Self, Error> {
-        let res = Self::parser().then_ignore(end()).parse(dbg!(inp));
-
-        res.into_result()
-            .map_err(|e| Error::ParseError(e.into_iter().map(|e| e.to_string()).join("\n")))
+    fn parse(i: &'a str) -> Result<Self, Error> {
+        all_consuming(Self::parse_raw::<NomError<&str>>)
+            .parse(i)
+            .finish()
+            .map(|v| v.1)
+            .map_err(|e| e.cloned().into())
     }
 }
 
-fn number<'a>() -> impl Parser<'a, &'a str, u64, extra::Err<Simple<'a, char>>> {
-    one_of("0123456789")
-        .repeated()
-        .to_slice()
-        .map(|v: &str| v.parse().unwrap())
+fn word<'a, E: NomParseError<&'a str>>(i: &'a str) -> IResult<&'a str, &'a str, E> {
+    let (i, val) = terminated(is_not("\t\n"), one_of("\t\n")).parse(i)?;
+
+    Ok((i, val))
 }
 
-fn taken_ignore<'a, O, E>(
-    parser: impl Parser<'a, &'a str, O, E> + Clone,
-) -> impl Parser<'a, &'a str, &'a str, E>
-where
-    E: ParserExtra<'a, &'a str>,
-{
-    any()
-        .and_is(parser.clone().not())
-        .repeated()
-        .to_slice()
-        .then_ignore(parser)
+fn number<'a, E: NomParseError<&'a str>>(i: &'a str) -> IResult<&'a str, u64, E> {
+    let (i, val) = take_while(|c: char| c.is_ascii_digit()).parse(i)?;
+
+    Ok((i, val.parse().unwrap()))
 }

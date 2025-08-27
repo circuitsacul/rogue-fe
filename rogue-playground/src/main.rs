@@ -54,42 +54,18 @@ async fn main() -> anyhow::Result<()> {
     let res = eaccess::M::parse(buf.as_str())?;
 
     // get info for all nodes
+    let mut access = None;
     for (node, name) in &res.0 {
         if name != &"GemStone IV" {
             continue;
         }
 
-        // node info
-        // tcp.write_all(eaccess::N::out(node).as_bytes()).await?;
-
-        // let mut buf = String::new();
-        // tcp.read_line(&mut buf).await?;
-        // let res = eaccess::N::parse(buf.as_str())?;
-        // tracing::trace!("({node}, {name}) => {res:?}");
-
-        // request pricing model?
-        // tcp.write_all(eaccess::F::out(node).as_bytes()).await?;
-
-        // let mut buf = String::new();
-        // tcp.read_line(&mut buf).await?;
-        // let res = eaccess::F::parse(buf.as_str())?;
-        // tracing::trace!("{res:?}");
-
-        // what is this
         tcp.write_all(eaccess::G::out(node).as_bytes()).await?;
 
         let mut buf = String::new();
         tcp.read_line(&mut buf).await?;
         let res = eaccess::G::parse(buf.as_str())?;
         tracing::trace!("{res:?}");
-
-        // and what is this lol
-        // tcp.write_all(eaccess::P::out(node).as_bytes()).await?;
-
-        // let mut buf = String::new();
-        // tcp.read_line(&mut buf).await?;
-        // let res = eaccess::P::parse(buf.as_str())?;
-        // tracing::trace!("{node} {res:?}");
 
         tcp.write_all(eaccess::C::out().as_bytes()).await?;
 
@@ -107,7 +83,38 @@ async fn main() -> anyhow::Result<()> {
             tcp.read_line(&mut buf).await?;
             let res = eaccess::L::parse(buf.as_str())?;
             tracing::trace!("{res:?}");
+            access = Some((res.game_host.to_owned(), res.game_port, res.key.to_owned()));
+            tracing::trace!("{access:?}");
         }
+    }
+
+    drop(tcp);
+    let Some((host, port, key)) = access else {
+        anyhow::bail!("where's my stuff");
+    };
+    let tcp = TcpStream::connect((host.as_str(), port as _)).await?;
+    let mut tcp = BufReader::new(tcp);
+
+    let mut line = String::new();
+    tcp.read_line(&mut line).await?;
+    tracing::trace!("0 -> {line}");
+
+    tcp.write_all(format!("{key}\n/FE:WRAYTH /VERSION:1.0.1.28 /P:WIN_UNKNOWN /XML\n").as_bytes())
+        .await?;
+    for i in 0..3 {
+        let mut line = String::new();
+        tcp.read_line(&mut line).await?;
+        tracing::trace!("{i} -> {line}");
+    }
+
+    tcp.write_all(b"/XML\n").await?;
+
+    let mut buffer = String::new();
+
+    loop {
+        buffer.clear();
+        tcp.read_line(&mut buffer).await?;
+        print!("{buffer}")
     }
 
     // get node for gs4
@@ -115,7 +122,7 @@ async fn main() -> anyhow::Result<()> {
     //     anyhow::bail!("GemStone IV server not found")
     // };
 
-    Ok(())
+    // Ok(())
 }
 
 fn setup_tracing() -> anyhow::Result<()> {
