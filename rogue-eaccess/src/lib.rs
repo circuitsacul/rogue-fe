@@ -400,7 +400,7 @@ pub trait Message<'a>: Sized {
     fn parser() -> impl Parser<'a, &'a str, Self, extra::Err<Simple<'a, char>>>;
 
     fn parse(inp: &'a str) -> Result<Self, Error> {
-        let res = Self::parser().then_ignore(end()).parse(dbg!(inp));
+        let res = Self::parser().then_ignore(end()).parse(inp);
 
         res.into_result()
             .map_err(|e| Error::ParseError(e.into_iter().map(|e| e.to_string()).join("\n")))
